@@ -19,10 +19,18 @@ from .config import (
     get_security_settings,
     get_django_security_settings,
     validate_configuration,
+    ErdenizSecurityConfig,
 )
 
+# Hashers (Django)
+try:
+    from .hashers import ErdenizArgon2Hasher, ErdenizBcryptHasher
+except ImportError:
+    ErdenizArgon2Hasher = None  # type: ignore[misc, assignment]
+    ErdenizBcryptHasher = None  # type: ignore[misc, assignment]
+
 # Audit
-from .audit import log_event, get_alerts, get_stats
+from .audit import log_event, get_alerts, get_stats, audit_trail, export_audit_logs
 
 # API Security (optional imports)
 try:
@@ -63,6 +71,13 @@ except ImportError:
     SecureCharField = SecureTextField = SecureEmailField = None
     SecurePhoneField = SecureTCKimlikField = SecureFilePathField = None
 
+# Env protector (IntegrityChecker, SecureSettings)
+try:
+    from .env_protector import IntegrityChecker, SecureSettings
+except ImportError:
+    IntegrityChecker = None  # type: ignore[misc, assignment]
+    SecureSettings = None  # type: ignore[misc, assignment]
+
 # Decorators
 from .decorators import (
     audit_log,
@@ -71,6 +86,8 @@ from .decorators import (
     require_signed_request,
     rate_limit,
     verify_webhook,
+    secure_view,
+    permission_required_custom,
 )
 
 __all__ = [
@@ -86,9 +103,14 @@ __all__ = [
     "get_security_settings",
     "get_django_security_settings",
     "validate_configuration",
+    "ErdenizSecurityConfig",
+    "ErdenizArgon2Hasher",
+    "ErdenizBcryptHasher",
     "log_event",
     "get_alerts",
     "get_stats",
+    "audit_trail",
+    "export_audit_logs",
     "ERDENIZ_JWT_SETTINGS",
     "ERDENIZ_RATE_LIMITS",
     "ErdenizAPIKeyManager",
@@ -104,10 +126,14 @@ __all__ = [
     "SecurePhoneField",
     "SecureTCKimlikField",
     "SecureFilePathField",
+    "IntegrityChecker",
+    "SecureSettings",
     "audit_log",
     "require_api_key",
     "require_jwt",
     "require_signed_request",
     "rate_limit",
     "verify_webhook",
+    "secure_view",
+    "permission_required_custom",
 ]

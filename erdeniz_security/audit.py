@@ -4,7 +4,7 @@ erdeniz_security/audit.py — SecurityAuditLog modeli ve log_event/get_alerts/ge
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -75,3 +75,138 @@ def get_stats(project: str | None = None, days: int = 7) -> dict[str, Any]:
         return {"total": qs.count(), "failed": qs.filter(success=False).count(), "auth_fail": qs.filter(event_type="AUTH_FAIL").count(), "days": days}
     except Exception:
         return {"total": 0, "failed": 0, "auth_fail": 0, "days": days}
+
+
+def _parse_datetime(value: Any) -> Any:
+    """datetime veya ISO string'i datetime'a çevir."""
+    if value is None:
+        return None
+    from django.utils.dateparse import parse_datetime
+    if hasattr(value, "isoformat"):
+        return value
+    if isinstance(value, str):
+        return parse_datetime(value) or value
+    return value
+
+
+def audit_trail(
+    action: str = "ACTION",
+    project: str = "erdeniz_security",
+    include_result: bool = False,
+):
+    """
+    View veya servis fonksiyonunu otomatik audit logla.
+    @audit_trail(action="user_export", project="worktrackere")
+    def my_view(request): ...
+    """
+    from functools import wraps
+    import time
+
+    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(func)
+        def _wrapped(*args: Any, **kwargs: Any) -> Any:
+            request = None
+            user = None
+            if args and hasattr(args[0], "META"):
+                request = args[0]
+                user = getattr(request, "user", None)
+            start = time.time()
+            success = True
+            details: dict[str, Any] = {}
+            result = None
+            try:
+                result = func(*args, **kwargs)
+                if hasattr(result, "status_code") and result.status_code >= 400:
+                    success = False
+                if include_result and result is not None:
+                    details["result"] = str(result)[:200]
+                return result
+            except Exception as e:
+                success = False
+                details["error"] = str(e)[:200]
+                raise
+            finally:
+                duration_ms = int((time.time() - start) * 1000)
+                resource = (request.path[:255] if request and getattr(request, "path", None) else action)
+                log_event(
+                    action,
+                    resource,
+                    project,
+                    user=user,
+                    request=request,
+                    success=success,
+                    details=details or None,
+                    duration_ms=duration_ms,
+                )
+        return _wrapped
+    return decorator
+
+
+def export_audit_logs(
+    project: str | None = None,
+    since: Any = None,
+    until: Any = None,
+    event_types: list[str] | None = None,
+    format: str = "json",
+    limit: int = 10000,
+) -> str:
+    """
+    Audit logları dışa aktar. JSON veya CSV.
+    Dönen JSON: {"count": N, "project": "...", "records": [...]}
+    """
+    import json
+    import csv
+    from io import StringIO
+
+    try:
+        from .models import SecurityAuditLog
+
+        qs = SecurityAuditLog.objects.all().order_by("-timestamp")
+        if project:
+            qs = qs.filter(project=project)
+        since_dt = _parse_datetime(since)
+        if since_dt:
+            qs = qs.filter(timestamp__gte=since_dt)
+        until_dt = _parse_datetime(until)
+        if until_dt:
+            qs = qs.filter(timestamp__lte=until_dt)
+        if event_types:
+            qs = qs.filter(event_type__in=event_types)
+        qs = qs[:limit]
+
+        def record_to_dict(rec: Any) -> dict[str, Any]:
+            return {
+                "id": rec.pk,
+                "timestamp": rec.timestamp.isoformat() if hasattr(rec.timestamp, "isoformat") else str(rec.timestamp),
+                "event_type": rec.event_type,
+                "project": rec.project,
+                "resource": rec.resource,
+                "success": rec.success,
+                "ip_address": str(rec.ip_address) if rec.ip_address else "",
+                "user_id": rec.user_id,
+                "duration_ms": rec.duration_ms,
+                "details": rec.details if isinstance(rec.details, dict) else {},
+            }
+
+        records = [record_to_dict(r) for r in qs]
+        count = len(records)
+
+        if format == "csv":
+            out = StringIO()
+            if not records:
+                return "timestamp,event_type,project,resource,success,ip_address,user_id,duration_ms,details\n"
+            writer = csv.DictWriter(out, fieldnames=list(records[0].keys()), extrasaction="ignore")
+            writer.writeheader()
+            for r in records:
+                r["details"] = json.dumps(r["details"], ensure_ascii=False, default=str)
+                writer.writerow(r)
+            return out.getvalue()
+
+        return json.dumps(
+            {"count": count, "project": project or "", "records": records},
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+    except Exception as e:
+        return json.dumps({"error": str(e), "records": []}, ensure_ascii=False, indent=2, default=str)

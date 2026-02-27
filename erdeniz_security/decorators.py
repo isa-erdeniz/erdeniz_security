@@ -140,3 +140,62 @@ def verify_webhook(category: str = "default"):
             return view_func(request, *args, **kwargs)
         return _wrapped
     return decorator
+
+
+def secure_view(
+    csp: str | None = None,
+    frame_options: str = "DENY",
+    hsts: bool = True,
+    cache_control: str = "no-store, no-cache, must-revalidate",
+):
+    """View'a güvenlik HTTP başlıkları ekle."""
+    def decorator(view_func: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(view_func)
+        def _wrapped(request: Any, *args: Any, **kwargs: Any) -> Any:
+            response = view_func(request, *args, **kwargs)
+            if not hasattr(response, "__setitem__"):
+                return response
+            response["X-Content-Type-Options"] = "nosniff"
+            response["X-Frame-Options"] = frame_options
+            response["X-XSS-Protection"] = "1; mode=block"
+            response["Cache-Control"] = cache_control
+            response["Pragma"] = "no-cache"
+            if csp:
+                response["Content-Security-Policy"] = csp
+            if hsts:
+                response["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains; preload"
+            return response
+        return _wrapped
+    return decorator
+
+
+def permission_required_custom(
+    permission: str,
+    project: str | None = None,
+    raise_exception: bool = True,
+):
+    """Granular yetki kontrolü. Django permission + ErdenizAPIKey izinleri."""
+    def decorator(view_func: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(view_func)
+        def _wrapped(request: Any, *args: Any, **kwargs: Any) -> Any:
+            from django.http import HttpResponseForbidden
+            from django.shortcuts import redirect
+            allowed = False
+            if getattr(request, "user", None) and getattr(request.user, "is_authenticated", lambda: False)():
+                if getattr(request.user, "has_perm", lambda p: False)(permission):
+                    allowed = True
+            if not allowed and getattr(request, "auth_api_info", None):
+                perms = request.auth_api_info.get("permissions") or []
+                if permission in perms or "admin:all" in perms:
+                    allowed = True
+            if not allowed:
+                try:
+                    log_event("AUTH_FAIL", request.path[:255], project or getattr(request, "_erdeniz_project", "api"), request=request, success=False, details={"permission": permission})
+                except Exception:
+                    pass
+                if raise_exception:
+                    return HttpResponseForbidden("Permission denied")
+                return redirect("/login/")
+            return view_func(request, *args, **kwargs)
+        return _wrapped
+    return decorator

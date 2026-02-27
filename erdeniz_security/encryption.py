@@ -38,11 +38,29 @@ def _get_fernet_key(key: str | bytes | None) -> bytes:
         k = (key if isinstance(key, str) else key.decode("utf-8")).strip()
         if k:
             return k.encode("ascii")
-    env_key = os.environ.get("ERDENIZ_ENCRYPTION_KEY", "").strip()
+    env_key = ""
+    for env_var in ("ERDENIZ_ENCRYPTION_KEY",):
+        try:
+            env_key = (os.environ.get(env_var) or "").strip()
+            if not env_key:
+                try:
+                    from decouple import config as _config
+                    env_key = (_config(env_var, default="") or "").strip()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        if env_key:
+            break
     if not env_key:
         raise RuntimeError(
-            "ERDENIZ_ENCRYPTION_KEY ortam değişkeni tanımlı olmalı. "
-            "generate_key ile üretip .env'ye ekleyin."
+            "ERDENIZ_ENCRYPTION_KEY ortam değişkeni tanımlı olmalı.\n"
+            "  Linux/macOS: export ERDENIZ_ENCRYPTION_KEY=<key>\n"
+            "  Windows CMD: set ERDENIZ_ENCRYPTION_KEY=<key>\n"
+            "  Windows PS:  $env:ERDENIZ_ENCRYPTION_KEY='<key>'\n"
+            "  Android:     export ERDENIZ_ENCRYPTION_KEY=<key> (Termux)\n"
+            "  .env dosyası: ERDENIZ_ENCRYPTION_KEY=<key>\n"
+            "Anahtar üretmek için: python manage.py generate_key --type fernet"
         )
     return env_key.encode("ascii")
 
@@ -118,7 +136,9 @@ class FileEncryptor:
         self, input_path: Path | str, output_path: Path | None = None
     ) -> Path:
         """Dosyayı şifrele. >=100MB ise otomatik stream modu kullanılır."""
-        inp = Path(input_path)
+        inp = Path(input_path).expanduser().resolve()
+        if hasattr(os, "path"):
+            inp = Path(os.path.normpath(inp))
         if not inp.is_file():
             raise FileNotFoundError(f"Dosya bulunamadı: {inp}")
         file_size = inp.stat().st_size
@@ -127,7 +147,9 @@ class FileEncryptor:
         if file_size > self._max_size_warn:
             logger.warning("Büyük dosya şifreleniyor (>100MB): %s", inp)
         payload = self._enc._fernet.encrypt(inp.read_bytes())
-        out = Path(output_path) if output_path else inp.with_suffix(inp.suffix + ".evault")
+        out = Path(output_path).expanduser().resolve() if output_path else inp.with_suffix(inp.suffix + ".evault")
+        if hasattr(os, "path"):
+            out = Path(os.path.normpath(out))
         out.write_bytes(payload)
         return out
 

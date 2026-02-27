@@ -5,6 +5,7 @@ Master password → key derivation → Fernet. ENCRYPTED_PREFIX = "ENC:v1:"
 from __future__ import annotations
 
 import base64
+import os
 import re
 import secrets
 from hashlib import sha256
@@ -153,3 +154,75 @@ class EnvProtector:
         self.decrypt_env(env_path, dec_path)
         EnvProtector(new_password).encrypt_env(dec_path, env_path)
         dec_path.unlink(missing_ok=True)
+
+
+class IntegrityChecker:
+    """Runtime'da env değişkenlerinin manipülasyonunu tespit eder."""
+
+    def __init__(self, watch_keys: list[str] | None = None) -> None:
+        self.watch_keys = watch_keys
+        self._snapshot: dict[str, str] = {}
+        self._violations: list[dict] = []
+
+    def take_snapshot(self) -> None:
+        import hashlib
+        keys = self.watch_keys or list(os.environ.keys())
+        self._snapshot = {k: hashlib.sha256(os.environ.get(k, "").encode()).hexdigest() for k in keys}
+
+    def check_integrity(self) -> list[dict]:
+        import hashlib
+        violations: list[dict] = []
+        current_keys = set(os.environ.keys())
+        snapshot_keys = set(self._snapshot.keys())
+        for k in snapshot_keys:
+            current_hash = hashlib.sha256(os.environ.get(k, "").encode()).hexdigest()
+            if k not in current_keys:
+                violations.append({"key": k, "status": "deleted"})
+            elif current_hash != self._snapshot[k]:
+                violations.append({"key": k, "status": "modified"})
+        if self.watch_keys is None:
+            for k in current_keys - snapshot_keys:
+                violations.append({"key": k, "status": "added"})
+        if violations:
+            try:
+                from .audit import log_event
+                log_event("SECURITY_ALERT", "env_integrity", "erdeniz_security", success=False, details={"violations": violations})
+            except Exception:
+                pass
+        self._violations.extend(violations)
+        return violations
+
+    def get_violations(self) -> list[dict]:
+        return list(self._violations)
+
+
+class SecureSettings:
+    """Hassas değerleri runtime'da şifreli tutar."""
+
+    def __init__(self, encryption_key: str | None = None) -> None:
+        from .encryption import ErdenizEncryptor
+        self._encryptor = ErdenizEncryptor(encryption_key)
+        self._store: dict[str, str] = {}
+
+    def set(self, key: str, value: str) -> None:
+        self._store[key] = self._encryptor.encrypt(value)
+
+    def get(self, key: str, default: str = "") -> str:
+        if key not in self._store:
+            return default
+        try:
+            return self._encryptor.decrypt(self._store[key])
+        except Exception:
+            return default
+
+    def load_from_env(self, keys: list[str]) -> None:
+        for k in keys:
+            v = os.environ.get(k, "")
+            if v:
+                self.set(k, v)
+
+    def delete(self, key: str) -> None:
+        self._store.pop(key, None)
+
+    def keys(self) -> list[str]:
+        return list(self._store.keys())
